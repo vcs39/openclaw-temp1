@@ -13,8 +13,8 @@ _CLR_CYAN='\033[0;36m'
 _CLR_RED='\033[0;31m'
 
 info() { echo -e "${_CLR_CYAN}${_CLR_BOLD}[INFO]${_CLR_RESET} $*"; }
-ok() { echo -e "${_CLR_GREEN}${_CLR_BOLD}[OK]${_CLR_RESET} $*"; }
 warn() { echo -e "${_CLR_YELLOW}${_CLR_BOLD}[WARN]${_CLR_RESET} $*"; }
+ok() { echo -e "${_CLR_GREEN}${_CLR_BOLD}[OK]${_CLR_RESET} $*"; }
 fail() { echo -e "${_CLR_RED}${_CLR_BOLD}[FAIL]${_CLR_RESET} $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,66 +27,67 @@ COMPOSE_BASE="$ROOT_DIR/docker-compose.yml"
 COMPOSE_SECURE="$ROOT_DIR/docker-compose.secure.yml"
 ENV_FILE="$ROOT_DIR/.env"
 
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    fail "Missing required command: $1"
+if [[ ! -f "$COMPOSE_BASE" ]]; then
+  fail "Missing $COMPOSE_BASE. Run this from an OpenClaw repo checkout."
+  exit 1
+fi
+
+check_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    fail "Missing required command: $cmd"
     exit 1
   fi
 }
 
-echo -e "${_CLR_BOLD}${_CLR_CYAN}OpenClaw secure setup${_CLR_RESET}"
+check_cmd docker
+check_cmd openssl
 
-require_cmd docker
-require_cmd openssl
 if ! docker compose version >/dev/null 2>&1; then
-  fail "Docker Compose v2 plugin is required."
-  exit 1
-fi
-if [[ ! -f "$COMPOSE_BASE" ]]; then
-  fail "Missing $COMPOSE_BASE"
+  fail "Docker Compose v2 plugin is required (docker compose)."
   exit 1
 fi
 
 if [[ -d "$STATE_DIR" ]]; then
-  warn "$STATE_DIR already exists"
-  read -r -p "Back up existing ~/.openclaw first? [Y/n] " backup_choice
+  warn "$STATE_DIR already exists."
+  read -r -p "Back up existing directory before continuing? [Y/n] " backup_choice
   if [[ ! "$backup_choice" =~ ^[Nn]$ ]]; then
     backup_path="${STATE_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
     cp -a "$STATE_DIR" "$backup_path"
-    ok "Backed up to $backup_path"
+    ok "Backed up existing config to $backup_path"
   fi
 fi
 
 read -r -p "Telegram bot token (must contain ':'): " TELEGRAM_BOT_TOKEN
 while [[ "$TELEGRAM_BOT_TOKEN" != *:* ]]; do
-  warn "Token must contain ':'"
+  warn "Invalid token format. Expected something like <id>:<token>."
   read -r -p "Telegram bot token: " TELEGRAM_BOT_TOKEN
 done
 
 read -r -p "Telegram user ID (numeric): " TELEGRAM_USER_ID
 while [[ ! "$TELEGRAM_USER_ID" =~ ^[0-9]+$ ]]; do
-  warn "User ID must be numeric"
+  warn "Telegram user ID must be numeric."
   read -r -p "Telegram user ID (numeric): " TELEGRAM_USER_ID
 done
 
 echo "Ollama mode:"
-echo "  1) docker"
-echo "  2) host"
+echo "  1) docker (co-deploy in compose)"
+echo "  2) host   (already running)"
 read -r -p "Choose [1/2] (default 1): " ollama_choice
 case "${ollama_choice:-1}" in
   1) OLLAMA_MODE="docker" ;;
   2) OLLAMA_MODE="host" ;;
   *)
-    warn "Unknown choice, using docker"
+    warn "Unknown choice, defaulting to docker."
     OLLAMA_MODE="docker"
     ;;
 esac
 
-read -r -p "Model to pull (default: llama3.2): " OLLAMA_MODEL
+read -r -p "Optional Ollama model to pull (default: llama3.2): " OLLAMA_MODEL
 OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2}"
 
 GATEWAY_TOKEN="$(openssl rand -hex 32)"
-ok "Generated gateway token (${#GATEWAY_TOKEN} chars)"
+ok "Generated gateway token (${#GATEWAY_TOKEN} chars)."
 
 mkdir -p "$CREDS_DIR" "$WORKSPACE_DIR"
 chmod 700 "$STATE_DIR" "$CREDS_DIR"
@@ -143,7 +144,7 @@ cat >"$CONFIG_PATH" <<EOF_CFG
 }
 EOF_CFG
 chmod 600 "$CONFIG_PATH"
-ok "Wrote $CONFIG_PATH"
+ok "Wrote secure config to $CONFIG_PATH"
 
 if [[ "$OLLAMA_MODE" == "docker" ]]; then
   cat >"$COMPOSE_SECURE" <<'EOF_COMPOSE'
@@ -191,7 +192,7 @@ networks:
     internal: true
 EOF_COMPOSE
 fi
-ok "Wrote $COMPOSE_SECURE"
+ok "Generated $COMPOSE_SECURE"
 
 cat >"$ENV_FILE" <<EOF_ENV
 OPENCLAW_IMAGE=openclaw:local
@@ -201,20 +202,21 @@ OPENCLAW_WORKSPACE_DIR=$WORKSPACE_DIR
 EOF_ENV
 ok "Wrote $ENV_FILE"
 
-info "Building stack"
+info "Building containers..."
 docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_SECURE" build
 
-info "Starting stack"
+info "Starting containers..."
 docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_SECURE" up -d
 
 if [[ "$OLLAMA_MODE" == "docker" ]]; then
-  info "Pulling Ollama model: $OLLAMA_MODEL"
+  info "Pulling model in Ollama container: $OLLAMA_MODEL"
   docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_SECURE" exec -T ollama ollama pull "$OLLAMA_MODEL"
 fi
 
+masked_token="${GATEWAY_TOKEN:0:8}..."
 echo
-echo -e "${_CLR_BOLD}${_CLR_GREEN}Setup complete${_CLR_RESET}"
+echo -e "${_CLR_BOLD}Secure setup complete${_CLR_RESET}"
 echo "Gateway URL: http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}"
-echo "Gateway token: ${GATEWAY_TOKEN:0:8}..."
-echo "Verify: bash scripts/verify-secure-setup.sh"
-echo "Logs: docker compose -f docker-compose.yml -f docker-compose.secure.yml logs -f"
+echo "Gateway token: $masked_token"
+echo "Verify setup: bash scripts/verify-secure-setup.sh"
+echo "View logs: docker compose -f docker-compose.yml -f docker-compose.secure.yml logs -f"
